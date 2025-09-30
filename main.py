@@ -6,7 +6,6 @@ TIC_TIMEOUT = 0.1
 
 
 async def blink(canvas, row, column, symbol='*', offset_tics=0):
-    # Случайная задержка перед началом, чтобы звезды мигали не синхронно
     for _ in range(offset_tics):
         await asyncio.sleep(0)
     
@@ -36,6 +35,53 @@ async def blink(canvas, row, column, symbol='*', offset_tics=0):
             await asyncio.sleep(0)
 
 
+async def fire(canvas, start_row, start_column, rows_speed=-0.02, columns_speed=0):
+    """Display animation of gun shot, direction and speed can be specified."""
+
+    row, column = start_row, start_column
+
+    rows, columns = canvas.getmaxyx()
+    max_row, max_column = rows - 1, columns - 1
+
+    def inside(current_row: float, current_column: float) -> bool:
+        return 1 <= current_row < max_row and 1 <= current_column < max_column
+
+    def draw_symbol(char: str) -> None:
+        if inside(row, column):
+            canvas.addstr(round(row), round(column), char)
+            canvas.refresh()
+
+    draw_symbol('*')
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    draw_symbol('O')
+    for _ in range(5):
+        await asyncio.sleep(0)
+    if inside(row, column):
+        canvas.addstr(round(row), round(column), ' ')
+
+    symbol = '-' if columns_speed else '|'
+    curses.beep()
+
+    prev_coords = None
+    while inside(row, column):
+        current_coords = (round(row), round(column))
+        if inside(*current_coords):
+            canvas.addstr(*current_coords, symbol)
+            canvas.refresh()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        if prev_coords and inside(*prev_coords):
+            canvas.addstr(*prev_coords, ' ')
+        prev_coords = current_coords
+        row += rows_speed
+        column += columns_speed
+
+    if prev_coords and inside(*prev_coords):
+        canvas.addstr(*prev_coords, ' ')
+
+
 async def draw(canvas):
     curses.curs_set(False)
     canvas.nodelay(True)
@@ -44,11 +90,14 @@ async def draw(canvas):
     canvas.border()
 
     center_y = max_y // 2
-    center_x = (max_x - 5) // 2
-    if center_y > 0 and center_x > 0 and center_y < max_y - 1 and center_x + 5 < max_x - 1:
-        canvas.addstr(center_y, center_x, "Hello")
+    center_x = max_x // 2
 
-    # Создаем 100 звезд в случайных позициях
+    # Добавляем подсказку
+    hint_text = "Press SPACE to fire!"
+    hint_x = max_x - len(hint_text) - 2
+    if hint_x > 0:
+        canvas.addstr(1, hint_x, hint_text)
+
     stars_count = 100
     star_symbols = '+*.:'
     tasks = []
@@ -57,53 +106,51 @@ async def draw(canvas):
         star_y = random.randint(1, max_y - 2)
         star_x = random.randint(1, max_x - 2)
         symbol = random.choice(star_symbols)
-        offset = random.randint(0, 30)
+        offset = random.randint(0, 100)
         
         task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
         tasks.append(task)
 
     canvas.refresh()
 
-    try:
-        while True:
-            key = canvas.getch()
-            if key == curses.KEY_RESIZE:
-                for task in tasks:
-                    task.cancel()
-                tasks = []
-                
-                max_y, max_x = canvas.getmaxyx()
-                canvas.clear()
-                canvas.border()
+    while True:
+        key = canvas.getch()
+        if key == curses.KEY_RESIZE:
+            max_y, max_x = canvas.getmaxyx()
+            center_y = max_y // 2
+            center_x = max_x // 2
+            canvas.clear()
+            canvas.border()
+            
+            hint_text = "Press SPACE to fire!"
+            hint_x = max_x - len(hint_text) - 2
+            if hint_x > 0:
+                canvas.addstr(1, hint_x, hint_text)
+            
+            canvas.refresh()
 
-                center_y = max_y // 2
-                center_x = (max_x - 5) // 2
-                if center_y > 0 and center_x > 0 and center_y < max_y - 1 and center_x + 5 < max_x - 1:
-                    canvas.addstr(center_y, center_x, "Hello")
+        elif key == ord(' '):
+            # Выстрел по нажатию пробела
+            fire_task = asyncio.create_task(fire(canvas, center_y, center_x))
+            tasks.append(fire_task)
 
-                for _ in range(stars_count):
-                    star_y = random.randint(1, max_y - 2)
-                    star_x = random.randint(1, max_x - 2)
-                    symbol = random.choice(star_symbols)
-                    offset = random.randint(0, 30)
-                    task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
-                    tasks.append(task)
+        elif key in [ord('q'), ord('Q'), ord('й'), ord('Й')]:
+            break
 
-                canvas.refresh()
+        # Удаляем завершенные задачи
+        tasks = [task for task in tasks if not task.done()]
 
-            elif key in [ord('q'), ord('Q'), ord('й'), ord('Й')]:
-                break
-
-            await asyncio.sleep(TIC_TIMEOUT)
-
-    finally:
-        for task in tasks:
-            task.cancel()
-        for task in tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        canvas.refresh()
+        await asyncio.sleep(TIC_TIMEOUT)
+    
+    # Отменяем все задачи при выходе
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 def main(stdscr):
     asyncio.run(draw(stdscr))
