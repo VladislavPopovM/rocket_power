@@ -1,10 +1,15 @@
 import asyncio
 import curses
+import random
 
 TIC_TIMEOUT = 0.1
 
 
-async def blink(canvas, row, column, symbol='*'):
+async def blink(canvas, row, column, symbol='*', offset_tics=0):
+    # Случайная задержка перед началом, чтобы звезды мигали не синхронно
+    for _ in range(offset_tics):
+        await asyncio.sleep(0)
+    
     while True:
         max_y, max_x = canvas.getmaxyx()
         if row >= 0 and column >= 0 and row < max_y and column < max_x:
@@ -43,19 +48,19 @@ async def draw(canvas):
     if center_y > 0 and center_x > 0 and center_y < max_y - 1 and center_x + 5 < max_x - 1:
         canvas.addstr(center_y, center_x, "Hello")
 
-    stars_positions = [
-        (1, 1),
-        (1, max_x - 2),
-        (max_y - 2, 1),
-        (max_y - 2, max_x - 2),
-        (max_y // 2 - 2, max_x // 2)
-    ]
-
+    # Создаем 100 звезд в случайных позициях
+    stars_count = 100
+    star_symbols = '+*.:'
     tasks = []
-    for star_y, star_x in stars_positions:
-        if star_y > 0 and star_x > 0 and star_y < max_y - 1 and star_x < max_x - 1:
-            task = asyncio.create_task(blink(canvas, star_y, star_x))
-            tasks.append(task)
+    
+    for _ in range(stars_count):
+        star_y = random.randint(1, max_y - 2)
+        star_x = random.randint(1, max_x - 2)
+        symbol = random.choice(star_symbols)
+        offset = random.randint(0, 30)
+        
+        task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
+        tasks.append(task)
 
     canvas.refresh()
 
@@ -76,18 +81,13 @@ async def draw(canvas):
                 if center_y > 0 and center_x > 0 and center_y < max_y - 1 and center_x + 5 < max_x - 1:
                     canvas.addstr(center_y, center_x, "Hello")
 
-                stars_positions = [
-                    (1, 1),
-                    (1, max_x - 2),
-                    (max_y - 2, 1),
-                    (max_y - 2, max_x - 2),
-                    (max_y // 2 - 2, max_x // 2)
-                ]
-                
-                for star_y, star_x in stars_positions:
-                    if star_y > 0 and star_x > 0 and star_y < max_y - 1 and star_x < max_x - 1:
-                        task = asyncio.create_task(blink(canvas, star_y, star_x))
-                        tasks.append(task)
+                for _ in range(stars_count):
+                    star_y = random.randint(1, max_y - 2)
+                    star_x = random.randint(1, max_x - 2)
+                    symbol = random.choice(star_symbols)
+                    offset = random.randint(0, 30)
+                    task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
+                    tasks.append(task)
 
                 canvas.refresh()
 
