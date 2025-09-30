@@ -1,49 +1,101 @@
-import time
+import asyncio
 import curses
+
+
+async def blink(canvas, row, column, symbol='*'):
+    while True:
+        canvas.addstr(row, column, symbol, curses.A_DIM)
+        await asyncio.sleep(0)
+
+        canvas.addstr(row, column, symbol)
+        await asyncio.sleep(0)
+
+        canvas.addstr(row, column, symbol, curses.A_BOLD)
+        await asyncio.sleep(0)
+
+        canvas.addstr(row, column, symbol)
+        await asyncio.sleep(0)
+
+
+async def draw_text(canvas, row, column, text):
+    """Выводит текст в указанной позиции"""
+    canvas.addstr(row, column, text)
+    canvas.refresh()
 
 
 # Основная функция рисования, которая вызывается curses.wrapper()
 # canvas - это объект экрана curses, предоставляемый библиотекой
-def draw(canvas):
-    # Отключаем отображение курсора для более чистого интерфейса
+async def draw(canvas):
     curses.curs_set(False)
-
-    # Включаем неблокирующий режим получения клавиш
-    # Теперь getch() не будет ждать нажатия клавиши, а сразу вернет -1 если клавиша не нажата
     canvas.nodelay(True)
 
-    text = 'Hello, World!'
+    # Получаем размеры окна
+    max_y, max_x = canvas.getmaxyx()
 
-    def redraw():
-        # Очищаем экран перед перерисовкой
-        canvas.clear()
-        # Рисуем рамку вокруг всего окна
-        canvas.border()
+    # Выводим рамку
+    canvas.border()
 
-        max_y, max_x = canvas.getmaxyx()
-        row = max_y // 2
-        column = (max_x - len(text)) // 2
+    # Выводим "Hello" в центре экрана
+    center_y = max_y // 2
+    center_x = (max_x - 5) // 2  # 5 - длина слова "Hello"
+    if center_y > 0 and center_x > 0 and center_y < max_y - 1 and center_x + 5 < max_x - 1:
+        canvas.addstr(center_y, center_x, "Hello")
 
-        if row > 0 and column > 0 and row < max_y - 1 and column + len(text) < max_x - 1:
-            canvas.addstr(row, column, text)
+    # Определяем позицию для звездочки в углу (левый верхний угол)
+    star_y = 1
+    star_x = 1
 
-        # Обновляем экран, показывая все изменения
-        canvas.refresh()
+    # Проверяем, что позиция звездочки валидна
+    if not (star_y > 0 and star_x > 0 and star_y < max_y - 1 and star_x < max_x - 1):
+        return
 
-    # Первоначальная отрисовка при запуске программы
-    redraw()
+    # Создаем асинхронную задачу для мигания звездочки в углу
+    task = asyncio.create_task(blink(canvas, star_y, star_x))
 
-    # Основной цикл обработки событий
-    while True:
-        key = canvas.getch()
+    # Обновляем экран
+    canvas.refresh()
 
-        if key == curses.KEY_RESIZE:
-            redraw()
-        elif key in [ord('q'), ord('Q'), ord('й'), ord('Й')]:
-            break
+    try:
+        while True:
+            # Проверяем нажатие клавиш и события окна
+            key = canvas.getch()
+            if key == curses.KEY_RESIZE:
+                # При изменении размера окна пересчитываем позиции и перерисовываем
+                max_y, max_x = canvas.getmaxyx()
 
-        # Небольшая пауза для снижения нагрузки на процессор
-        time.sleep(0.1)
+                # Очищаем экран и рисуем рамку заново
+                canvas.clear()
+                canvas.border()
+
+                # Пересчитываем позицию для "Hello" в центре
+                center_y = max_y // 2
+                center_x = (max_x - 5) // 2
+                if center_y > 0 and center_x > 0 and center_y < max_y - 1 and center_x + 5 < max_x - 1:
+                    canvas.addstr(center_y, center_x, "Hello")
+
+                # Обновляем позицию звездочки для нового размера (левый верхний угол)
+                star_y = 1
+                star_x = 1
+
+                canvas.refresh()
+
+            elif key in [ord('q'), ord('Q'), ord('й'), ord('Й')]:
+                break
+
+            # Небольшая пауза для снижения нагрузки на процессор
+            await asyncio.sleep(0.1)
+
+    finally:
+        # Отменяем задачу мигания при выходе
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+def main(stdscr):
+    """Синхронная обертка для запуска асинхронной функции в curses"""
+    asyncio.run(draw(stdscr))
 
 if __name__ == '__main__':
-    curses.wrapper(draw)
+    curses.wrapper(main)
