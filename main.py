@@ -1,9 +1,19 @@
 import asyncio
 import curses
 import random
+import itertools
+from curses_tools import draw_frame
+import locale
+
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 TIC_TIMEOUT = 0.1
 
+# Читаем кадры анимации корабля заранее
+with open('frames/rocket_frame_1.txt', 'r', encoding='utf-8') as f:
+    frame1 = f.read()
+with open('frames/rocket_frame_2.txt', 'r', encoding='utf-8') as f:
+    frame2 = f.read()
 
 async def blink(canvas, row, column, symbol='*', offset_tics=0):
     for _ in range(offset_tics):
@@ -82,6 +92,19 @@ async def fire(canvas, start_row, start_column, rows_speed=-0.02, columns_speed=
         canvas.addstr(*prev_coords, ' ')
 
 
+async def animate_spaceship(canvas, row, column, frames):
+    """Animate spaceship with given frames."""
+    
+    for frame in itertools.cycle(frames):
+        draw_frame(canvas, row, column, frame)
+        canvas.refresh()
+        
+        for _ in range(5):
+            await asyncio.sleep(0)
+        
+        draw_frame(canvas, row, column, frame, negative=True)
+
+
 async def draw(canvas):
     curses.curs_set(False)
     canvas.nodelay(True)
@@ -91,6 +114,10 @@ async def draw(canvas):
 
     center_y = max_y // 2
     center_x = max_x // 2
+
+    
+    
+    rocket_frames = [frame1, frame2]
 
     # Добавляем подсказку
     hint_text = "Press SPACE to fire!"
@@ -110,6 +137,10 @@ async def draw(canvas):
         
         task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
         tasks.append(task)
+
+    # Добавляем анимацию космического корабля в центре
+    spaceship_task = asyncio.create_task(animate_spaceship(canvas, center_y, center_x, rocket_frames))
+    tasks.append(spaceship_task)
 
     canvas.refresh()
 
@@ -153,6 +184,7 @@ async def draw(canvas):
             pass
 
 def main(stdscr):
+    curses.use_default_colors()
     asyncio.run(draw(stdscr))
 
 if __name__ == '__main__':
