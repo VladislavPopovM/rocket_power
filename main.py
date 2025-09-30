@@ -92,17 +92,6 @@ async def fire(canvas, start_row, start_column, rows_speed=-0.02, columns_speed=
         canvas.addstr(*prev_coords, ' ')
 
 
-async def animate_spaceship(canvas, row, column, frames):
-    """Animate spaceship with given frames."""
-    
-    for frame in itertools.cycle(frames):
-        draw_frame(canvas, row, column, frame)
-        canvas.refresh()
-        
-        for _ in range(5):
-            await asyncio.sleep(0)
-        
-        draw_frame(canvas, row, column, frame, negative=True)
 
 
 async def draw(canvas):
@@ -138,14 +127,25 @@ async def draw(canvas):
         task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
         tasks.append(task)
 
-    # Добавляем анимацию космического корабля в центре
-    spaceship_task = asyncio.create_task(animate_spaceship(canvas, center_y, center_x, rocket_frames))
-    tasks.append(spaceship_task)
+    # Позиция корабля (начинаем в центре)
+    spaceship_row = center_y
+    spaceship_column = center_x
+    
+    # Итератор для кадров анимации корабля
+    frame_iterator = itertools.cycle(rocket_frames)
+    current_frame = next(frame_iterator)
+    frame_counter = 0
 
     canvas.refresh()
 
     while True:
+        # Читаем клавиши напрямую
         key = canvas.getch()
+        
+        # Обработка управления
+        rows_direction = columns_direction = 0
+        space_pressed = False
+        
         if key == curses.KEY_RESIZE:
             max_y, max_x = canvas.getmaxyx()
             center_y = max_y // 2
@@ -153,20 +153,54 @@ async def draw(canvas):
             canvas.clear()
             canvas.border()
             
-            hint_text = "Press SPACE to fire!"
+            hint_text = "WASD/Arrows: move, SPACE: fire, Q: quit"
             hint_x = max_x - len(hint_text) - 2
             if hint_x > 0:
                 canvas.addstr(1, hint_x, hint_text)
             
             canvas.refresh()
-
-        elif key == ord(' '):
-            # Выстрел по нажатию пробела
-            fire_task = asyncio.create_task(fire(canvas, center_y, center_x))
-            tasks.append(fire_task)
-
+            
         elif key in [ord('q'), ord('Q'), ord('й'), ord('Й')]:
             break
+            
+        elif key == ord('w') or key == curses.KEY_UP:
+            rows_direction = -1
+        elif key == ord('s') or key == curses.KEY_DOWN:
+            rows_direction = 1
+        elif key == ord('a') or key == curses.KEY_LEFT:
+            columns_direction = -1
+        elif key == ord('d') or key == curses.KEY_RIGHT:
+            columns_direction = 1
+        elif key == ord(' '):
+            space_pressed = True
+        
+        # Стираем старый кадр корабля
+        draw_frame(canvas, spaceship_row, spaceship_column, current_frame, negative=True)
+        
+        # Обновляем позицию корабля
+        if rows_direction != 0 or columns_direction != 0:
+            # Вычисляем новую позицию
+            new_row = spaceship_row + rows_direction
+            new_column = spaceship_column + columns_direction
+            
+            # Проверяем границы
+            if 1 <= new_row <= max_y - 10 and 1 <= new_column <= max_x - 10:
+                spaceship_row = new_row
+                spaceship_column = new_column
+        
+        # Обновляем кадр анимации каждые 2 тика
+        frame_counter += 1
+        if frame_counter >= 2:
+            current_frame = next(frame_iterator)
+            frame_counter = 0
+        
+        # Рисуем текущий кадр корабля
+        draw_frame(canvas, spaceship_row, spaceship_column, current_frame)
+        
+        # Выстрел
+        if space_pressed:
+            fire_task = asyncio.create_task(fire(canvas, spaceship_row, spaceship_column + 2))
+            tasks.append(fire_task)
 
         # Удаляем завершенные задачи
         tasks = [task for task in tasks if not task.done()]
