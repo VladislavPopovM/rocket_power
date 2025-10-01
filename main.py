@@ -1,225 +1,202 @@
-import asyncio
 import curses
 import random
 import itertools
-from curses_tools import draw_frame
 import locale
+import time
+from curses_tools import draw_frame, read_controls
 
-locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
-
+# Глобальные константы
 TIC_TIMEOUT = 0.1
+STARS_COUNT = 100
+STAR_SYMBOLS = '+*.:'
+FRAME_SWITCH_INTERVAL = 2
 
-# Читаем кадры анимации корабля заранее
-with open('frames/rocket_frame_1.txt', 'r', encoding='utf-8') as f:
-    frame1 = f.read()
-with open('frames/rocket_frame_2.txt', 'r', encoding='utf-8') as f:
-    frame2 = f.read()
+# Границы и размеры
+BORDER_WIDTH = 1
+SPACESHIP_SIZE = 10  # Размер корабля для проверки границ
+HINT_OFFSET = 2  # Отступ для подсказки
+HINT_LONG_OFFSET = 40  # Отступ для длинной подсказки
 
-async def blink(canvas, row, column, symbol='*', offset_tics=0):
+# Анимация звезд
+STAR_DIM_DURATION = 20
+STAR_NORMAL_DURATION = 3
+STAR_BOLD_DURATION = 5
+STAR_OFFSET_MAX = 100
+
+# Анимация выстрела
+FIRE_FLASH_DURATION = 5
+FIRE_MOVE_DURATION = 3
+FIRE_SPEED = -0.9
+
+# Позиционирование
+CENTER_DIVISOR = 2
+SPACESHIP_FIRE_OFFSET = 2
+
+
+def load_rocket_frames():
+    """Загружает кадры анимации ракеты из файлов."""
+    with open('frames/rocket_frame_1.txt', 'r', encoding='utf-8') as f:
+        frame1 = f.read()
+    with open('frames/rocket_frame_2.txt', 'r', encoding='utf-8') as f:
+        frame2 = f.read()
+    return [frame1, frame2]
+
+
+def sleep(seconds):
+    """Простая функция задержки для корутин."""
+    end_time = time.time() + seconds
+    while time.time() < end_time:
+        yield
+
+
+def blink(canvas, row, column, symbol='*', offset_tics=0):
+    """Генератор для анимации мерцания звезд."""
     for _ in range(offset_tics):
-        await asyncio.sleep(0)
+        yield
     
     while True:
-        max_y, max_x = canvas.getmaxyx()
-        if row >= 0 and column >= 0 and row < max_y and column < max_x:
-            canvas.addstr(row, column, symbol, curses.A_DIM)
-        for _ in range(20):
-            await asyncio.sleep(0)
+        canvas.addstr(row, column, symbol, curses.A_DIM)
+        for _ in range(STAR_DIM_DURATION):
+            yield
 
-        max_y, max_x = canvas.getmaxyx()
-        if row >= 0 and column >= 0 and row < max_y and column < max_x:
-            canvas.addstr(row, column, symbol)
-        for _ in range(3):
-            await asyncio.sleep(0)
+        canvas.addstr(row, column, symbol)
+        for _ in range(STAR_NORMAL_DURATION):
+            yield
 
-        max_y, max_x = canvas.getmaxyx()
-        if row >= 0 and column >= 0 and row < max_y and column < max_x:
-            canvas.addstr(row, column, symbol, curses.A_BOLD)
-        for _ in range(5):
-            await asyncio.sleep(0)
+        canvas.addstr(row, column, symbol, curses.A_BOLD)
+        for _ in range(STAR_BOLD_DURATION):
+            yield
 
-        max_y, max_x = canvas.getmaxyx()
-        if row >= 0 and column >= 0 and row < max_y and column < max_x:
-            canvas.addstr(row, column, symbol)
-        for _ in range(3):
-            await asyncio.sleep(0)
+        canvas.addstr(row, column, symbol)
+        for _ in range(STAR_NORMAL_DURATION):
+            yield
 
 
-async def fire(canvas, start_row, start_column, rows_speed=-0.02, columns_speed=0):
-    """Display animation of gun shot, direction and speed can be specified."""
-
+def fire(canvas, start_row, start_column, rows_speed=FIRE_SPEED, columns_speed=0):
+    """Генератор для анимации выстрела."""
     row, column = start_row, start_column
+    max_row, max_column = canvas.getmaxyx()
+    max_row -= BORDER_WIDTH
+    max_column -= BORDER_WIDTH
 
-    rows, columns = canvas.getmaxyx()
-    max_row, max_column = rows - 1, columns - 1
+    # Начальная вспышка
+    canvas.addstr(round(row), round(column), '*')
+    canvas.refresh()
+    for _ in range(FIRE_FLASH_DURATION):
+        yield
 
-    def inside(current_row: float, current_column: float) -> bool:
-        return 1 <= current_row < max_row and 1 <= current_column < max_column
+    canvas.addstr(round(row), round(column), 'O')
+    canvas.refresh()
+    for _ in range(FIRE_FLASH_DURATION):
+        yield
+    
+    canvas.addstr(round(row), round(column), ' ')
+    canvas.refresh()
 
-    def draw_symbol(char: str) -> None:
-        if inside(row, column):
-            canvas.addstr(round(row), round(column), char)
-            canvas.refresh()
-
-    draw_symbol('*')
-    for _ in range(5):
-        await asyncio.sleep(0)
-
-    draw_symbol('O')
-    for _ in range(5):
-        await asyncio.sleep(0)
-    if inside(row, column):
-        canvas.addstr(round(row), round(column), ' ')
-
+    # Движение снаряда
     symbol = '-' if columns_speed else '|'
     curses.beep()
 
-    prev_coords = None
-    while inside(row, column):
-        current_coords = (round(row), round(column))
-        if inside(*current_coords):
-            canvas.addstr(*current_coords, symbol)
-            canvas.refresh()
-        for _ in range(3):
-            await asyncio.sleep(0)
-        if prev_coords and inside(*prev_coords):
-            canvas.addstr(*prev_coords, ' ')
-        prev_coords = current_coords
+    while BORDER_WIDTH <= row < max_row and BORDER_WIDTH <= column < max_column:
+        canvas.addstr(round(row), round(column), symbol)
+        canvas.refresh()
+        for _ in range(FIRE_MOVE_DURATION):
+            yield
+        
+        canvas.addstr(round(row), round(column), ' ')
         row += rows_speed
         column += columns_speed
 
-    if prev_coords and inside(*prev_coords):
-        canvas.addstr(*prev_coords, ' ')
 
-
-
-
-async def draw(canvas):
-    curses.curs_set(False)
-    canvas.nodelay(True)
-
-    max_y, max_x = canvas.getmaxyx()
-    canvas.border()
-
-    center_y = max_y // 2
-    center_x = max_x // 2
-
-    
-    
-    rocket_frames = [frame1, frame2]
-
-    # Добавляем подсказку
-    hint_text = "Press SPACE to fire!"
-    hint_x = max_x - len(hint_text) - 2
-    if hint_x > 0:
-        canvas.addstr(1, hint_x, hint_text)
-
-    stars_count = 100
-    star_symbols = '+*.:'
-    tasks = []
-    
-    for _ in range(stars_count):
-        star_y = random.randint(1, max_y - 2)
-        star_x = random.randint(1, max_x - 2)
-        symbol = random.choice(star_symbols)
-        offset = random.randint(0, 100)
-        
-        task = asyncio.create_task(blink(canvas, star_y, star_x, symbol, offset))
-        tasks.append(task)
-
+def animate_spaceship(canvas, rocket_frames, max_y, max_x):
+    """Генератор для анимации корабля."""
     # Позиция корабля (начинаем в центре)
-    spaceship_row = center_y
-    spaceship_column = center_x
+    spaceship_row = max_y // CENTER_DIVISOR
+    spaceship_column = max_x // CENTER_DIVISOR
     
     # Итератор для кадров анимации корабля
     frame_iterator = itertools.cycle(rocket_frames)
     current_frame = next(frame_iterator)
     frame_counter = 0
 
-    canvas.refresh()
-
     while True:
-        # Читаем клавиши напрямую
-        key = canvas.getch()
-        
-        # Обработка управления
-        rows_direction = columns_direction = 0
-        space_pressed = False
-        
-        if key == curses.KEY_RESIZE:
-            max_y, max_x = canvas.getmaxyx()
-            center_y = max_y // 2
-            center_x = max_x // 2
-            canvas.clear()
-            canvas.border()
-            
-            hint_text = "WASD/Arrows: move, SPACE: fire, Q: quit"
-            hint_x = max_x - len(hint_text) - 2
-            if hint_x > 0:
-                canvas.addstr(1, hint_x, hint_text)
-            
-            canvas.refresh()
-            
-        elif key in [ord('q'), ord('Q'), ord('й'), ord('Й')]:
-            break
-            
-        elif key == ord('w') or key == curses.KEY_UP:
-            rows_direction = -1
-        elif key == ord('s') or key == curses.KEY_DOWN:
-            rows_direction = 1
-        elif key == ord('a') or key == curses.KEY_LEFT:
-            columns_direction = -1
-        elif key == ord('d') or key == curses.KEY_RIGHT:
-            columns_direction = 1
-        elif key == ord(' '):
-            space_pressed = True
+        # Читаем управление
+        rows_direction, columns_direction, space_pressed = read_controls(canvas)
         
         # Стираем старый кадр корабля
         draw_frame(canvas, spaceship_row, spaceship_column, current_frame, negative=True)
         
         # Обновляем позицию корабля
-        if rows_direction != 0 or columns_direction != 0:
-            # Вычисляем новую позицию
+        if rows_direction or columns_direction:
             new_row = spaceship_row + rows_direction
             new_column = spaceship_column + columns_direction
-            
-            # Проверяем границы
-            if 1 <= new_row <= max_y - 10 and 1 <= new_column <= max_x - 10:
-                spaceship_row = new_row
-                spaceship_column = new_column
+            if (BORDER_WIDTH <= new_row <= max_y - SPACESHIP_SIZE and 
+                BORDER_WIDTH <= new_column <= max_x - SPACESHIP_SIZE):
+                spaceship_row, spaceship_column = new_row, new_column
         
-        # Обновляем кадр анимации каждые 2 тика
+        # Обновляем кадр анимации
         frame_counter += 1
-        if frame_counter >= 2:
+        if frame_counter >= FRAME_SWITCH_INTERVAL:
             current_frame = next(frame_iterator)
             frame_counter = 0
         
         # Рисуем текущий кадр корабля
         draw_frame(canvas, spaceship_row, spaceship_column, current_frame)
         
+        # Возвращаем информацию о выстреле
+        yield space_pressed, spaceship_row, spaceship_column
+
+
+def draw(canvas):
+    curses.curs_set(False)
+    canvas.nodelay(True)
+
+    max_y, max_x = canvas.getmaxyx()
+    canvas.border()
+
+    rocket_frames = load_rocket_frames()
+
+    # Добавляем подсказку
+    hint_text = "Press SPACE to fire!"
+    canvas.addstr(BORDER_WIDTH, max_x - len(hint_text) - HINT_OFFSET, hint_text)
+
+    # Создаем корутины для звезд
+    coroutines = [blink(canvas, random.randint(BORDER_WIDTH, max_y - BORDER_WIDTH - 1), 
+                      random.randint(BORDER_WIDTH, max_x - BORDER_WIDTH - 1), 
+                      random.choice(STAR_SYMBOLS), 
+                      random.randint(0, STAR_OFFSET_MAX)) 
+                  for _ in range(STARS_COUNT)]
+
+    # Создаем корутину для корабля
+    spaceship_coro = animate_spaceship(canvas, rocket_frames, max_y, max_x)
+
+    canvas.refresh()
+
+    while True:
+        # Получаем состояние корабля
+        space_pressed, spaceship_row, spaceship_column = next(spaceship_coro)
+        
         # Выстрел
         if space_pressed:
-            fire_task = asyncio.create_task(fire(canvas, spaceship_row, spaceship_column + 2))
-            tasks.append(fire_task)
+            fire_coro = fire(canvas, spaceship_row, spaceship_column + SPACESHIP_FIRE_OFFSET)
+            coroutines.append(fire_coro)
 
-        # Удаляем завершенные задачи
-        tasks = [task for task in tasks if not task.done()]
+        # Выполняем все корутины
+        for coro in coroutines[:]:  # Создаем копию списка для безопасной итерации
+            try:
+                next(coro)
+            except StopIteration:
+                # Корутина завершилась, удаляем её
+                coroutines.remove(coro)
 
         canvas.refresh()
-        await asyncio.sleep(TIC_TIMEOUT)
-    
-    # Отменяем все задачи при выходе
-    for task in tasks:
-        task.cancel()
-    for task in tasks:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        time.sleep(TIC_TIMEOUT)
 
 def main(stdscr):
+    """Основная функция программы."""
+    locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
     curses.use_default_colors()
-    asyncio.run(draw(stdscr))
+    draw(stdscr)
 
 if __name__ == '__main__':
-    curses.wrapper(main)
+    curses.wrapper(main)    
