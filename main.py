@@ -1,9 +1,10 @@
+import asyncio
 import curses
 import random
 import itertools
 import locale
-import time
-from curses_tools import draw_frame, read_controls
+from curses_tools import draw_frame, read_controls, get_frame_size
+from physics import update_speed
 
 # Глобальные константы
 TIC_TIMEOUT = 0.1
@@ -30,7 +31,16 @@ FIRE_SPEED = -0.9
 
 # Позиционирование
 CENTER_DIVISOR = 2
-SPACESHIP_FIRE_OFFSET = 2
+GARBAGE_FILES = [
+    'frames/duck.txt',
+    'frames/hubble.txt',
+    'frames/lamp.txt',
+    'frames/trash_small.txt',
+    'frames/trash_large.txt',
+    'frames/trash_xl.txt',
+]
+GARBAGE_SPAWN_DELAY_RANGE = (10, 30)
+GARBAGE_SPEED_RANGE = (0.3, 1.0)
 
 
 def load_rocket_frames():
@@ -42,112 +52,193 @@ def load_rocket_frames():
     return [frame1, frame2]
 
 
-def sleep(seconds):
-    """Простая функция задержки для корутин."""
-    end_time = time.time() + seconds
-    while time.time() < end_time:
-        yield
+def load_garbage_frames():
+    """Загружает кадры мусора."""
+    frames = []
+    for path in GARBAGE_FILES:
+        with open(path, 'r', encoding='utf-8') as fh:
+            frames.append(fh.read())
+    return frames
 
 
-def blink(canvas, row, column, symbol='*', offset_tics=0):
-    """Генератор для анимации мерцания звезд."""
-    for _ in range(offset_tics):
-        yield
-    
+async def sleep(tics=1):
+    """Задержка на указанное количество тиков."""
+    if tics <= 0:
+        return
+    await asyncio.sleep(tics * TIC_TIMEOUT)
+
+
+async def blink(canvas, row, column, symbol='*', offset_tics=0):
+    """Корутина для анимации мерцания звезд."""
+    await sleep(offset_tics)
+
     while True:
         canvas.addstr(row, column, symbol, curses.A_DIM)
-        for _ in range(STAR_DIM_DURATION):
-            yield
+        canvas.refresh()
+        await sleep(STAR_DIM_DURATION)
 
         canvas.addstr(row, column, symbol)
-        for _ in range(STAR_NORMAL_DURATION):
-            yield
+        canvas.refresh()
+        await sleep(STAR_NORMAL_DURATION)
 
         canvas.addstr(row, column, symbol, curses.A_BOLD)
-        for _ in range(STAR_BOLD_DURATION):
-            yield
+        canvas.refresh()
+        await sleep(STAR_BOLD_DURATION)
 
         canvas.addstr(row, column, symbol)
-        for _ in range(STAR_NORMAL_DURATION):
-            yield
+        canvas.refresh()
+        await sleep(STAR_NORMAL_DURATION)
 
 
-def fire(canvas, start_row, start_column, rows_speed=FIRE_SPEED, columns_speed=0):
-    """Генератор для анимации выстрела."""
+async def fly_garbage(canvas, column, garbage_frame, speed=0.5):
+    """Animate garbage, flying from top to bottom. Column position will stay same, as specified on start."""
+    rows_number, columns_number = canvas.getmaxyx()
+
+    column = max(column, 0)
+    column = min(column, columns_number - 1)
+
+    row = 0
+
+    while row < rows_number:
+        draw_frame(canvas, row, column, garbage_frame)
+        await sleep(1)
+        draw_frame(canvas, row, column, garbage_frame, negative=True)
+        row += speed
+
+
+async def fill_orbit_with_garbage(canvas, garbage_frames, garbage_tasks):
+    """Создает бесконечный поток мусора."""
+    while True:
+        frame = random.choice(garbage_frames)
+        _, columns = canvas.getmaxyx()
+        _, frame_width = get_frame_size(frame)
+        max_column = max(columns - frame_width - BORDER_WIDTH, BORDER_WIDTH)
+        column = random.randint(BORDER_WIDTH, max_column)
+        speed = random.uniform(*GARBAGE_SPEED_RANGE)
+        task = asyncio.create_task(fly_garbage(canvas, column, frame, speed))
+        garbage_tasks.add(task)
+        task.add_done_callback(lambda task: garbage_tasks.discard(task))
+        await sleep(random.randint(*GARBAGE_SPAWN_DELAY_RANGE))
+
+
+async def fire(canvas, start_row, start_column, rows_speed=FIRE_SPEED, columns_speed=0):
+    """Корутина для анимации выстрела."""
     row, column = start_row, start_column
     max_row, max_column = canvas.getmaxyx()
     max_row -= BORDER_WIDTH
     max_column -= BORDER_WIDTH
 
-    # Начальная вспышка
     canvas.addstr(round(row), round(column), '*')
     canvas.refresh()
-    for _ in range(FIRE_FLASH_DURATION):
-        yield
+    await sleep(FIRE_FLASH_DURATION)
 
     canvas.addstr(round(row), round(column), 'O')
     canvas.refresh()
-    for _ in range(FIRE_FLASH_DURATION):
-        yield
-    
+    await sleep(FIRE_FLASH_DURATION)
+
     canvas.addstr(round(row), round(column), ' ')
     canvas.refresh()
 
-    # Движение снаряда
     symbol = '-' if columns_speed else '|'
     curses.beep()
 
     while BORDER_WIDTH <= row < max_row and BORDER_WIDTH <= column < max_column:
         canvas.addstr(round(row), round(column), symbol)
         canvas.refresh()
-        for _ in range(FIRE_MOVE_DURATION):
-            yield
-        
+        await sleep(FIRE_MOVE_DURATION)
+
         canvas.addstr(round(row), round(column), ' ')
         row += rows_speed
         column += columns_speed
 
 
-def animate_spaceship(canvas, rocket_frames, max_y, max_x):
-    """Генератор для анимации корабля."""
-    # Позиция корабля (начинаем в центре)
-    spaceship_row = max_y // CENTER_DIVISOR
-    spaceship_column = max_x // CENTER_DIVISOR
-    
-    # Итератор для кадров анимации корабля
+
+async def run_spaceship(canvas, rocket_frames, max_y, max_x, fire_tasks):
+    """Корутина для анимации корабля."""
+    spaceship_row = max_y / CENTER_DIVISOR
+    spaceship_column = max_x / CENTER_DIVISOR
+    row_speed = 0.0
+    column_speed = 0.0
+
     frame_iterator = itertools.cycle(rocket_frames)
     current_frame = next(frame_iterator)
+    frame_height, frame_width = get_frame_size(current_frame)
     frame_counter = 0
 
+    min_row = BORDER_WIDTH
+    min_column = BORDER_WIDTH
+    max_row_position = max(min_row, max_y - frame_height - BORDER_WIDTH)
+    max_column_position = max(min_column, max_x - frame_width - BORDER_WIDTH)
+    spaceship_row = min(max(spaceship_row, min_row), max_row_position)
+    spaceship_column = min(max(spaceship_column, min_column), max_column_position)
+
+    draw_frame(canvas, round(spaceship_row), round(spaceship_column), current_frame)
+    canvas.refresh()
+
     while True:
-        # Читаем управление
         rows_direction, columns_direction, space_pressed = read_controls(canvas)
-        
-        # Стираем старый кадр корабля
-        draw_frame(canvas, spaceship_row, spaceship_column, current_frame, negative=True)
-        
-        # Обновляем позицию корабля
-        if rows_direction or columns_direction:
-            new_row = spaceship_row + rows_direction
-            new_column = spaceship_column + columns_direction
-            if (BORDER_WIDTH <= new_row <= max_y - SPACESHIP_SIZE and 
-                BORDER_WIDTH <= new_column <= max_x - SPACESHIP_SIZE):
-                spaceship_row, spaceship_column = new_row, new_column
-        
-        # Обновляем кадр анимации
+
+        draw_frame(canvas, round(spaceship_row), round(spaceship_column), current_frame, negative=True)
+
+        row_speed, column_speed = update_speed(row_speed, column_speed, rows_direction, columns_direction)
+
+        next_row = spaceship_row + row_speed
+        next_column = spaceship_column + column_speed
+
+        min_row = BORDER_WIDTH
+        min_column = BORDER_WIDTH
+        max_row_position = max_y - frame_height - BORDER_WIDTH
+        max_column_position = max_x - frame_width - BORDER_WIDTH
+        max_row_position = max(min_row, max_row_position)
+        max_column_position = max(min_column, max_column_position)
+
+        if next_row < min_row:
+            next_row = min_row
+            row_speed = 0
+        elif next_row > max_row_position:
+            next_row = max_row_position
+            row_speed = 0
+
+        if next_column < min_column:
+            next_column = min_column
+            column_speed = 0
+        elif next_column > max_column_position:
+            next_column = max_column_position
+            column_speed = 0
+
+        spaceship_row, spaceship_column = next_row, next_column
+
         frame_counter += 1
         if frame_counter >= FRAME_SWITCH_INTERVAL:
             current_frame = next(frame_iterator)
+            frame_height, frame_width = get_frame_size(current_frame)
             frame_counter = 0
-        
-        # Рисуем текущий кадр корабля
-        draw_frame(canvas, spaceship_row, spaceship_column, current_frame)
-        
-        # Возвращаем информацию о выстреле
-        yield space_pressed, spaceship_row, spaceship_column
+
+            max_row_position = max_y - frame_height - BORDER_WIDTH
+            max_column_position = max_x - frame_width - BORDER_WIDTH
+            max_row_position = max(min_row, max_row_position)
+            max_column_position = max(min_column, max_column_position)
+            spaceship_row = min(max(spaceship_row, min_row), max_row_position)
+            spaceship_column = min(max(spaceship_column, min_column), max_column_position)
+
+        draw_frame(canvas, round(spaceship_row), round(spaceship_column), current_frame)
+        canvas.refresh()
+
+        if space_pressed:
+            fire_row = max(round(spaceship_row) - 1, BORDER_WIDTH)
+            fire_column = round(spaceship_column) + frame_width // 2
+            fire_column = max(fire_column, BORDER_WIDTH)
+            fire_column = min(fire_column, max_x - BORDER_WIDTH)
+            fire_task = asyncio.create_task(
+                fire(canvas, fire_row, fire_column)
+            )
+            fire_tasks.add(fire_task)
+            fire_task.add_done_callback(lambda task: fire_tasks.discard(task))
+
+        await sleep(1)
 
 
-def draw(canvas):
+async def draw(canvas):
     curses.curs_set(False)
     canvas.nodelay(True)
 
@@ -155,48 +246,39 @@ def draw(canvas):
     canvas.border()
 
     rocket_frames = load_rocket_frames()
+    garbage_frames = load_garbage_frames()
 
-    # Добавляем подсказку
     hint_text = "Press SPACE to fire!"
     canvas.addstr(BORDER_WIDTH, max_x - len(hint_text) - HINT_OFFSET, hint_text)
-
-    # Создаем корутины для звезд
-    coroutines = [blink(canvas, random.randint(BORDER_WIDTH, max_y - BORDER_WIDTH - 1), 
-                      random.randint(BORDER_WIDTH, max_x - BORDER_WIDTH - 1), 
-                      random.choice(STAR_SYMBOLS), 
-                      random.randint(0, STAR_OFFSET_MAX)) 
-                  for _ in range(STARS_COUNT)]
-
-    # Создаем корутину для корабля
-    spaceship_coro = animate_spaceship(canvas, rocket_frames, max_y, max_x)
-
     canvas.refresh()
 
-    while True:
-        # Получаем состояние корабля
-        space_pressed, spaceship_row, spaceship_column = next(spaceship_coro)
-        
-        # Выстрел
-        if space_pressed:
-            fire_coro = fire(canvas, spaceship_row, spaceship_column + SPACESHIP_FIRE_OFFSET)
-            coroutines.append(fire_coro)
+    fire_tasks = set()
+    garbage_tasks = set()
+    tasks = [
+        asyncio.create_task(run_spaceship(canvas, rocket_frames, max_y, max_x, fire_tasks)),
+        asyncio.create_task(fill_orbit_with_garbage(canvas, garbage_frames, garbage_tasks)),
+    ]
 
-        # Выполняем все корутины
-        for coro in coroutines[:]:  # Создаем копию списка для безопасной итерации
-            try:
-                next(coro)
-            except StopIteration:
-                # Корутина завершилась, удаляем её
-                coroutines.remove(coro)
+    for _ in range(STARS_COUNT):
+        tasks.append(asyncio.create_task(
+            blink(
+                canvas,
+                random.randint(BORDER_WIDTH, max_y - BORDER_WIDTH - 1),
+                random.randint(BORDER_WIDTH, max_x - BORDER_WIDTH - 1),
+                random.choice(STAR_SYMBOLS),
+                random.randint(0, STAR_OFFSET_MAX)
+            )
+        ))
 
-        canvas.refresh()
-        time.sleep(TIC_TIMEOUT)
+    await asyncio.gather(*tasks)
+
 
 def main(stdscr):
     """Основная функция программы."""
     locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
     curses.use_default_colors()
-    draw(stdscr)
+    asyncio.run(draw(stdscr))
+
 
 if __name__ == '__main__':
-    curses.wrapper(main)    
+    curses.wrapper(main)
