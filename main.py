@@ -5,6 +5,9 @@ import itertools
 import locale
 from curses_tools import draw_frame, read_controls, get_frame_size
 from physics import update_speed
+from obstacles import Obstacle, show_obstacles
+from explosion import explode
+from game_scenario import PHRASES, get_garbage_delay_tics
 
 # Глобальные константы
 TIC_TIMEOUT = 0.1
@@ -25,9 +28,9 @@ STAR_BOLD_DURATION = 5
 STAR_OFFSET_MAX = 100
 
 # Анимация выстрела
-FIRE_FLASH_DURATION = 5
-FIRE_MOVE_DURATION = 3
-FIRE_SPEED = -0.9
+FIRE_FLASH_DURATION = 2
+FIRE_MOVE_DURATION = 1
+FIRE_SPEED = -0.999
 
 # Позиционирование
 CENTER_DIVISOR = 2
@@ -39,9 +42,21 @@ GARBAGE_FILES = [
     'frames/trash_large.txt',
     'frames/trash_xl.txt',
 ]
-GARBAGE_SPAWN_DELAY_RANGE = (10, 30)
 GARBAGE_SPEED_RANGE = (0.3, 1.0)
 
+YEAR_START = 1957
+YEAR_SECONDS = 1.5
+YEAR_TICS = max(1, int(YEAR_SECONDS / TIC_TIMEOUT))
+
+DEBUG_OBSTACLES = False
+
+obstacles = []
+obstacles_in_last_collisions = []
+
+year = YEAR_START
+
+with open('frames/gameover.txt', 'r', encoding='utf-8') as fh:
+    GAME_OVER_FRAME = fh.read()
 
 def load_rocket_frames():
     """Загружает кадры анимации ракеты из файлов."""
@@ -68,6 +83,57 @@ async def sleep(tics=1):
     await asyncio.sleep(tics * TIC_TIMEOUT)
 
 
+async def show_gameover(canvas):
+    """Отображает экран Game Over в центре."""
+    rows, columns = get_frame_size(GAME_OVER_FRAME)
+    max_row, max_column = canvas.getmaxyx()
+    start_row = max((max_row - rows) // 2, BORDER_WIDTH)
+    start_column = max((max_column - columns) // 2, BORDER_WIDTH)
+
+    while True:
+        draw_frame(canvas, start_row, start_column, GAME_OVER_FRAME)
+        await sleep(1)
+
+
+async def update_year():
+    """Увеличивает текущий год согласно игровому темпу."""
+    global year
+    while True:
+        await sleep(YEAR_TICS)
+        year += 1
+
+
+async def show_year_info(canvas):
+    """Показывает текущий год и событие в верхней части экрана."""
+    last_phrase = ''
+    last_phrase_year = None
+    while True:
+        if year in PHRASES:
+            last_phrase = PHRASES[year]
+            last_phrase_year = year
+        elif last_phrase and last_phrase_year is not None and year - last_phrase_year > 2:
+            last_phrase = ''
+            last_phrase_year = None
+
+        max_rows, max_columns = canvas.getmaxyx()
+        info_row = min(max_rows - BORDER_WIDTH - 1, BORDER_WIDTH + 1)
+        message_row = min(info_row + 1, max_rows - BORDER_WIDTH - 1)
+        clear_width = max_columns - BORDER_WIDTH * 2
+        if clear_width > 0:
+            blank = ' ' * clear_width
+            try:
+                canvas.addstr(info_row, BORDER_WIDTH, blank)
+                canvas.addstr(info_row, BORDER_WIDTH, f'Year: {year}'[:clear_width])
+                canvas.addstr(message_row, BORDER_WIDTH, blank)
+                if last_phrase:
+                    canvas.addstr(message_row, BORDER_WIDTH, last_phrase[:clear_width])
+                canvas.refresh()
+            except curses.error:
+                pass
+
+        await sleep(1)
+
+
 async def blink(canvas, row, column, symbol='*', offset_tics=0):
     """Корутина для анимации мерцания звезд."""
     await sleep(offset_tics)
@@ -91,34 +157,62 @@ async def blink(canvas, row, column, symbol='*', offset_tics=0):
 
 
 async def fly_garbage(canvas, column, garbage_frame, speed=0.5):
-    """Animate garbage, flying from top to bottom. Column position will stay same, as specified on start."""
+    """Animate garbage falling within the playfield and register obstacle state."""
     rows_number, columns_number = canvas.getmaxyx()
+    frame_height, frame_width = get_frame_size(garbage_frame)
 
-    column = max(column, 0)
-    column = min(column, columns_number - 1)
+    max_column = max(BORDER_WIDTH, columns_number - frame_width - BORDER_WIDTH)
+    column = max(column, BORDER_WIDTH)
+    column = min(column, max_column)
+
+    max_row_position = max(rows_number - frame_height - BORDER_WIDTH, BORDER_WIDTH)
 
     row = 0
+    obstacle = Obstacle(row, column, frame_height, frame_width)
+    obstacles.append(obstacle)
 
-    while row < rows_number:
-        draw_frame(canvas, row, column, garbage_frame)
-        await sleep(1)
-        draw_frame(canvas, row, column, garbage_frame, negative=True)
-        row += speed
+    try:
+        while row < max_row_position:
+            obstacle.row = row
+            obstacle.column = column
+
+            draw_frame(canvas, row, column, garbage_frame)
+            await sleep(1)
+            draw_frame(canvas, row, column, garbage_frame, negative=True)
+
+            if obstacle not in obstacles or obstacle in obstacles_in_last_collisions:
+                if obstacle in obstacles_in_last_collisions:
+                    obstacles_in_last_collisions.remove(obstacle)
+                break
+
+            row += speed
+    finally:
+        if obstacle in obstacles:
+            obstacles.remove(obstacle)
+        if obstacle in obstacles_in_last_collisions:
+            obstacles_in_last_collisions.remove(obstacle)
 
 
 async def fill_orbit_with_garbage(canvas, garbage_frames, garbage_tasks):
-    """Создает бесконечный поток мусора."""
+    """Создает бесконечный поток мусора согласно сценарию."""
     while True:
+        delay = get_garbage_delay_tics(year)
+        if delay is None:
+            await sleep(1)
+            continue
+
         frame = random.choice(garbage_frames)
         _, columns = canvas.getmaxyx()
         _, frame_width = get_frame_size(frame)
         max_column = max(columns - frame_width - BORDER_WIDTH, BORDER_WIDTH)
         column = random.randint(BORDER_WIDTH, max_column)
         speed = random.uniform(*GARBAGE_SPEED_RANGE)
-        task = asyncio.create_task(fly_garbage(canvas, column, frame, speed))
+        task = asyncio.create_task(
+            fly_garbage(canvas, column, frame, speed)
+        )
         garbage_tasks.add(task)
         task.add_done_callback(lambda task: garbage_tasks.discard(task))
-        await sleep(random.randint(*GARBAGE_SPAWN_DELAY_RANGE))
+        await sleep(delay)
 
 
 async def fire(canvas, start_row, start_column, rows_speed=FIRE_SPEED, columns_speed=0):
@@ -143,11 +237,32 @@ async def fire(canvas, start_row, start_column, rows_speed=FIRE_SPEED, columns_s
     curses.beep()
 
     while BORDER_WIDTH <= row < max_row and BORDER_WIDTH <= column < max_column:
-        canvas.addstr(round(row), round(column), symbol)
+        row_int = round(row)
+        col_int = round(column)
+
+        hit_obstacle = None
+        for obstacle in tuple(obstacles):
+            if obstacle.has_collision(row_int, col_int):
+                hit_obstacle = obstacle
+                break
+
+        if hit_obstacle is not None:
+            if hit_obstacle not in obstacles_in_last_collisions:
+                obstacles_in_last_collisions.append(hit_obstacle)
+
+            await explode(canvas, row_int, col_int)
+
+            if hit_obstacle in obstacles:
+                obstacles.remove(hit_obstacle)
+            if hit_obstacle in obstacles_in_last_collisions:
+                obstacles_in_last_collisions.remove(hit_obstacle)
+            return
+
+        canvas.addstr(row_int, col_int, symbol)
         canvas.refresh()
         await sleep(FIRE_MOVE_DURATION)
 
-        canvas.addstr(round(row), round(column), ' ')
+        canvas.addstr(row_int, col_int, ' ')
         row += rows_speed
         column += columns_speed
 
@@ -224,6 +339,22 @@ async def run_spaceship(canvas, rocket_frames, max_y, max_x, fire_tasks):
         draw_frame(canvas, round(spaceship_row), round(spaceship_column), current_frame)
         canvas.refresh()
 
+        ship_row_int = round(spaceship_row)
+        ship_col_int = round(spaceship_column)
+        hit_obstacle = None
+        for obstacle in tuple(obstacles):
+            if obstacle.has_collision(ship_row_int, ship_col_int, frame_height, frame_width):
+                hit_obstacle = obstacle
+                break
+
+        if hit_obstacle is not None:
+            draw_frame(canvas, ship_row_int, ship_col_int, current_frame, negative=True)
+            canvas.refresh()
+            for task in tuple(fire_tasks):
+                task.cancel()
+            asyncio.create_task(show_gameover(canvas))
+            return
+
         if space_pressed:
             fire_row = max(round(spaceship_row) - 1, BORDER_WIDTH)
             fire_column = round(spaceship_column) + frame_width // 2
@@ -257,21 +388,33 @@ async def draw(canvas):
     tasks = [
         asyncio.create_task(run_spaceship(canvas, rocket_frames, max_y, max_x, fire_tasks)),
         asyncio.create_task(fill_orbit_with_garbage(canvas, garbage_frames, garbage_tasks)),
+        asyncio.create_task(update_year()),
+        asyncio.create_task(show_year_info(canvas)),
     ]
 
+    info_row = min(max_y - BORDER_WIDTH - 1, BORDER_WIDTH + 1)
+    message_row = min(info_row + 1, max_y - BORDER_WIDTH - 1)
+    star_row_top = min(message_row + 1, max_y - BORDER_WIDTH - 1)
+    star_row_bottom = max_y - BORDER_WIDTH - 1
+    star_row_top = min(star_row_top, star_row_bottom)
+
     for _ in range(STARS_COUNT):
+        star_row = random.randint(star_row_top, star_row_bottom)
+        star_column = random.randint(BORDER_WIDTH, max_x - BORDER_WIDTH - 1)
         tasks.append(asyncio.create_task(
             blink(
                 canvas,
-                random.randint(BORDER_WIDTH, max_y - BORDER_WIDTH - 1),
-                random.randint(BORDER_WIDTH, max_x - BORDER_WIDTH - 1),
+                star_row,
+                star_column,
                 random.choice(STAR_SYMBOLS),
                 random.randint(0, STAR_OFFSET_MAX)
             )
         ))
 
-    await asyncio.gather(*tasks)
+    if DEBUG_OBSTACLES:
+        tasks.append(asyncio.create_task(show_obstacles(canvas, obstacles)))
 
+    await asyncio.gather(*tasks)
 
 def main(stdscr):
     """Основная функция программы."""
