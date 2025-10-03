@@ -5,7 +5,7 @@ import itertools
 import locale
 from curses_tools import draw_frame, read_controls, get_frame_size
 from physics import update_speed
-from obstacles import Obstacle, show_obstacles
+from obstacles import Obstacle
 from explosion import explode
 from game_scenario import PHRASES, get_garbage_delay_tics
 
@@ -48,7 +48,7 @@ YEAR_START = 1957
 YEAR_SECONDS = 1.5
 YEAR_TICS = max(1, int(YEAR_SECONDS / TIC_TIMEOUT))
 
-DEBUG_OBSTACLES = False
+FIRE_UNLOCK_YEAR = 2020
 
 obstacles = []
 obstacles_in_last_collisions = []
@@ -132,6 +132,19 @@ async def show_year_info(canvas):
                 pass
 
         await sleep(1)
+
+
+async def show_fire_hint(canvas, max_x):
+    """Показывает подсказку об огне, когда пушка появится."""
+    hint_text = "Press SPACE to fire!"
+    hint_column = max(max_x - len(hint_text) - HINT_OFFSET, BORDER_WIDTH)
+    while year < FIRE_UNLOCK_YEAR:
+        await sleep(1)
+    try:
+        canvas.addstr(BORDER_WIDTH, hint_column, hint_text)
+        canvas.refresh()
+    except curses.error:
+        pass
 
 
 async def blink(canvas, row, column, symbol='*', offset_tics=0):
@@ -355,7 +368,7 @@ async def run_spaceship(canvas, rocket_frames, max_y, max_x, fire_tasks):
             asyncio.create_task(show_gameover(canvas))
             return
 
-        if space_pressed:
+        if space_pressed and year >= FIRE_UNLOCK_YEAR:
             fire_row = max(round(spaceship_row) - 1, BORDER_WIDTH)
             fire_column = round(spaceship_column) + frame_width // 2
             fire_column = max(fire_column, BORDER_WIDTH)
@@ -379,10 +392,6 @@ async def draw(canvas):
     rocket_frames = load_rocket_frames()
     garbage_frames = load_garbage_frames()
 
-    hint_text = "Press SPACE to fire!"
-    canvas.addstr(BORDER_WIDTH, max_x - len(hint_text) - HINT_OFFSET, hint_text)
-    canvas.refresh()
-
     fire_tasks = set()
     garbage_tasks = set()
     tasks = [
@@ -391,6 +400,7 @@ async def draw(canvas):
         asyncio.create_task(update_year()),
         asyncio.create_task(show_year_info(canvas)),
     ]
+    tasks.append(asyncio.create_task(show_fire_hint(canvas, max_x)))
 
     info_row = min(max_y - BORDER_WIDTH - 1, BORDER_WIDTH + 1)
     message_row = min(info_row + 1, max_y - BORDER_WIDTH - 1)
@@ -410,9 +420,6 @@ async def draw(canvas):
                 random.randint(0, STAR_OFFSET_MAX)
             )
         ))
-
-    if DEBUG_OBSTACLES:
-        tasks.append(asyncio.create_task(show_obstacles(canvas, obstacles)))
 
     await asyncio.gather(*tasks)
 
